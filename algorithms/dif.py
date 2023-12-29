@@ -212,91 +212,156 @@ class DIF:
         return final_scores
 
     def _training_transfer(self, X, ensemble_seeds):
+        """
+        训练深度集成模型。
+        Args:
+            X: 输入数据。
+            ensemble_seeds: 包含用于初始化集成模型的种子值的列表。
+        Returns:
+            None
+        """
         if self.new_ensemble_method:
+            # 新的集成方法
+            # 使用第一个种子值设置随机种子
             self.set_seed(ensemble_seeds[0])
+            # 创建神经网络模型，使用Net类，并传递指定的参数
             net = self.Net(n_features=self.n_features, **self.network_args).to(self.device)
+            # 初始化网络模型
             self.net_init(net)
-
+            # 使用深度传递批量集成方法处理输入数据
             self.x_reduced_lst = self.deep_transfer_batch_ensemble(X, net)
+            # 将初始化的模型添加到列表中
             self.net_lst.append(net)
         else:
-            for i in tqdm(range(self.n_ensemble), desc='training ensemble process', ncols=100, leave=None):
+            # 旧的集成方法
+            # 遍历每次集成迭代
+            for i in tqdm(range(self.n_ensemble), desc='训练集成过程', ncols=100, leave=None):
+                # 为这次迭代设置随机种子
                 self.set_seed(ensemble_seeds[i])
+                # 创建神经网络模型，使用Net类，并传递指定的参数
                 net = self.Net(n_features=self.n_features, **self.network_args).to(self.device)
+                # 初始化网络模型
                 self.net_init(net)
-
+                # 使用深度传递方法处理输入数据
                 self.x_reduced_lst.append(self.deep_transfer(X, net))
+                # 将初始化的模型添加到列表中
                 self.net_lst.append(net)
+        # 方法结束，没有明确的返回值（返回None）
         return
 
     def _inference_transfer(self, X):
+        """
+        推断方法，用于生成测试数据的降维表示。
+        Args:
+            X: 测试数据。
+        Returns:
+            生成的测试数据的降维表示列表。
+        """
+        # 检查特殊情况
         if self.data_type == 'tabular' and X.shape[0] == self.x_reduced_lst[0].shape[0]:
+            # 如果数据类型为'tabular'且测试数据行数与之前训练集的行数相同，直接返回之前训练集的降维表示
             return self.x_reduced_lst
-
-        test_reduced_lst = []
+        else:
+            # 否则，创建一个空的列表，用于存储新的测试数据的降维表示
+            test_reduced_lst = []
+        # 根据是否使用新的集成方法进行不同的处理
         if self.new_ensemble_method:
+            # 使用新的集成方法
+            # 对测试数据进行降维表示
             test_reduced_lst = self.deep_transfer_batch_ensemble(X, self.net_lst[0])
         else:
-            for i in tqdm(range(self.n_ensemble), desc='testing ensemble process', ncols=100, leave=None):
+            # 未使用新的集成方法
+            # 遍历每个训练好的模型，对测试数据进行降维表示
+            for i in tqdm(range(self.n_ensemble), desc='测试集成过程', ncols=100, leave=None):
                 x_reduced = self.deep_transfer(X, self.net_lst[i])
+                # 将结果添加到列表中
                 test_reduced_lst.append(x_reduced)
+        # 返回生成的测试数据的降维表示列表
         return test_reduced_lst
 
     def _inference_scoring(self, x_reduced_lst, n_processes):
+        """
+        推断得分方法，用于生成模型的得分。
+
+        Args:
+            x_reduced_lst: 降维表示列表。
+            n_processes: 并行处理的进程数。
+
+        Returns:
+            最终得分列表。
+        """
+        # 根据是否使用新的得分函数选择得分函数
         if self.new_score_func:
             score_func = self.single_predict
         else:
             score_func = self.single_predict_abla
-
+        # 获取样本数量
         n_samples = x_reduced_lst[0].shape[0]
+        # 初始化得分列表
         self.score_lst = np.zeros([self.n_ensemble, n_samples])
+        # 单进程处理
         if n_processes == 1:
             for i in range(self.n_ensemble):
+                # 使用得分函数计算得分
                 scores = score_func(x_reduced_lst[i], self.clf_lst[i])
                 self.score_lst[i] = scores
         else:
-            # multiprocessing predict
+            # 多进程处理
             start = np.arange(0, self.n_ensemble, np.ceil(self.n_ensemble / n_processes))
             for j in range(int(np.ceil(self.n_ensemble / n_processes))):
                 run_id = start + j
                 run_id = np.array(np.delete(run_id, np.where(run_id >= self.n_ensemble)), dtype=int)
                 if self.verbose >= 1:
-                    print('Multi-processing Running ensemble id :', run_id)
-
+                    print('多进程运行的集成ID:', run_id)
+                # 使用进程池进行并行计算
                 pool = Pool(processes=n_processes)
                 process_lst = [pool.apply_async(score_func, args=(x_reduced_lst[i], self.clf_lst[i]))
                                for i in run_id]
                 pool.close()
                 pool.join()
-
+                # 将计算结果填充回得分列表
                 for rid, process in zip(run_id, process_lst):
                     self.score_lst[rid] = process.get()
-
+        # 计算最终得分，取各模型得分的平均值
         final_scores = np.average(self.score_lst, axis=0)
-
         return final_scores
 
-
     def deep_transfer(self, X, net):
+        """
+        深度转移方法，用于对输入数据进行降维表示。
+        Args:
+            X: 输入数据。
+            net: 训练好的神经网络模型。
+        Returns:
+            降维表示结果。
+        """
         x_reduced = []
-
+        # 在无梯度计算的上下文中执行
         with torch.no_grad():
+            # 根据数据类型选择不同的 DataLoader
             if self.data_type != 'graph':
+                # 非图数据的 DataLoader
                 loader = DataLoader(X, batch_size=self.batch_size, drop_last=False, pin_memory=True, shuffle=False)
                 for batch_x in loader:
+                    # 将批次数据转换为张量，并移动到设备上
                     batch_x = batch_x.float().to(self.device)
+                    # 使用神经网络模型进行降维计算
                     batch_x_reduced = net(batch_x)
                     x_reduced.append(batch_x_reduced)
             else:
+                # 图数据的 DataLoader（使用 pyG 的 DataLoader）
                 loader = pyGDataLoader(X, batch_size=self.batch_size, shuffle=False, pin_memory=True, drop_last=False)
                 for data in loader:
+                    # 将图数据移动到设备上
                     data.to(self.device)
                     x, edge_index, batch = data.x, data.edge_index, data.batch
+                    # 处理缺失特征
                     if x is None:
                         x = torch.ones((batch.shape[0], 1)).to(self.device)
+                    # 使用神经网络模型进行降维计算
                     x, _ = net(x, edge_index, batch)
                     x_reduced.append(x)
-
+        # 将结果转换为 NumPy 数组，并进行标准化和激活函数处理
         x_reduced = torch.cat(x_reduced).data.cpu().numpy()
         x_reduced = StandardScaler().fit_transform(x_reduced)
         x_reduced = np.tanh(x_reduced)
